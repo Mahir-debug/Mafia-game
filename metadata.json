@@ -1,0 +1,6 @@
+{
+  "name": "Nocturne Mafia",
+  "description": "Real-time multiplayer Mafia social deduction game with WebSockets, AES-256-GCM encrypted chat, custom role counts, private match passwords, moderation, and role-specific death animations.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
