@@ -16,6 +16,7 @@ interface StoredSession {
 }
 
 const SESSION_KEY = 'nocturne_mafia_session';
+const CUSTOM_WS_KEY = 'nocturne_custom_ws_url';
 
 function loadStoredSession(): StoredSession | null {
   try {
@@ -38,12 +39,46 @@ function saveStoredSession(session: StoredSession | null) {
   }
 }
 
+export function normalizeWsUrl(input: string): string {
+  const trimmed = input.trim();
+  if (!trimmed) return '';
+  let url = trimmed;
+  if (url.startsWith('https://')) url = 'wss://' + url.slice('https://'.length);
+  else if (url.startsWith('http://')) url = 'ws://' + url.slice('http://'.length);
+  else if (!url.startsWith('ws://') && !url.startsWith('wss://')) url = `wss://${url}`;
+  url = url.replace(/\/+$/, '');
+  if (!url.endsWith('/ws')) url = `${url}/ws`;
+  return url;
+}
+
+export function getSavedCustomWsUrl(): string {
+  try {
+    return localStorage.getItem(CUSTOM_WS_KEY) || '';
+  } catch {
+    return '';
+  }
+}
+
+export function saveCustomWsUrl(url: string) {
+  try {
+    const clean = url.trim();
+    if (!clean) localStorage.removeItem(CUSTOM_WS_KEY);
+    else localStorage.setItem(CUSTOM_WS_KEY, normalizeWsUrl(clean));
+  } catch {
+    // ignore
+  }
+}
+
 export function useMafiaSocket() {
   const wsRef = useRef<WebSocket | null>(null);
   const reconnectTimerRef = useRef<number | null>(null);
   const shouldReconnectRef = useRef(true);
+  const pendingQueueRef = useRef<ClientToServerMessage[]>([]);
+  const failedAttemptsRef = useRef(0);
 
   const [connected, setConnected] = useState(false);
+  const [staticHostDetected, setStaticHostDetected] = useState(false);
+  const [activeWsUrl, setActiveWsUrl] = useState('');
   const [rooms, setRooms] = useState<RoomSummary[]>([]);
   const [gameState, setGameState] = useState<ClientGameState | null>(null);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
@@ -53,25 +88,39 @@ export function useMafiaSocket() {
     playerName: string;
   } | null>(null);
 
-  const sendRaw = useCallback((msg: ClientToServerMessage) => {
-    const ws = wsRef.current;
-    if (!ws || ws.readyState !== WebSocket.OPEN) {
-      setErrorMsg('Connection interrupted. Reconnecting to table...');
-      return;
-    }
-    ws.send(JSON.stringify(msg));
+  const resolveWsUrl = useCallback(() => {
+    const custom = getSavedCustomWsUrl();
+    if (custom) return custom;
+    if (import.meta.env.VITE_WS_URL) return normalizeWsUrl(import.meta.env.VITE_WS_URL);
+    const proto = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+    return `${proto}//${window.location.host}/ws`;
   }, []);
 
   const connect = useCallback(() => {
-    if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) return;
+    const existing = wsRef.current;
+    if (
+      existing &&
+      (existing.readyState === WebSocket.OPEN || existing.readyState === WebSocket.CONNECTING)
+    ) {
+      return;
+    }
 
-    const proto = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-    const wsUrl = import.meta.env.VITE_WS_URL || `${proto}//${window.location.host}/ws`;
-    const ws = new WebSocket(wsUrl);
+    const wsUrl = resolveWsUrl();
+    setActiveWsUrl(wsUrl);
+
+    let ws: WebSocket;
+    try {
+      ws = new WebSocket(wsUrl);
+    } catch {
+      setConnected(false);
+      return;
+    }
     wsRef.current = ws;
 
     ws.onopen = () => {
+      failedAttemptsRef.current = 0;
       setConnected(true);
+      setStaticHostDetected(false);
       setErrorMsg(null);
       setErrorCode(null);
 
@@ -87,6 +136,14 @@ export function useMafiaSocket() {
         );
       } else {
         ws.send(JSON.stringify({ type: 'lobby:subscribe' } satisfies ClientToServerMessage));
+      }
+
+      if (pendingQueueRef.current.length > 0) {
+        const queued = [...pendingQueueRef.current];
+        pendingQueueRef.current = [];
+        for (const q of queued) {
+          ws.send(JSON.stringify(q));
+        }
       }
     };
 
@@ -121,7 +178,6 @@ export function useMafiaSocket() {
           break;
         }
         case 'chat:message': {
-          // Idempotent append checking message ID
           setGameState((prev) => {
             if (!prev) return prev;
             if (prev.messages.some((m) => m.id === data.message.id)) return prev;
@@ -162,15 +218,77 @@ export function useMafiaSocket() {
       }
     };
 
+    ws.onerror = () => {
+      // handled in onclose
+    };
+
     ws.onclose = () => {
+      if (wsRef.current === ws) {
+        wsRef.current = null;
+      }
       setConnected(false);
+      failedAttemptsRef.current += 1;
+
+      if (failedAttemptsRef.current >= 2 && !getSavedCustomWsUrl() && !import.meta.env.VITE_WS_URL) {
+        void fetch('/api/health')
+          .then((r) => {
+            if (!r.ok) setStaticHostDetected(true);
+          })
+          .catch(() => {
+            setStaticHostDetected(true);
+          });
+      }
+
       if (shouldReconnectRef.current) {
+        const delay = Math.min(5000, 1000 + failedAttemptsRef.current * 500);
         reconnectTimerRef.current = window.setTimeout(() => {
           connect();
-        }, 1500);
+        }, delay);
       }
     };
-  }, []);
+  }, [resolveWsUrl]);
+
+  const sendRaw = useCallback(
+    (msg: ClientToServerMessage) => {
+      const ws = wsRef.current;
+      if (ws && ws.readyState === WebSocket.OPEN) {
+        ws.send(JSON.stringify(msg));
+        return;
+      }
+      if (ws && ws.readyState === WebSocket.CONNECTING) {
+        pendingQueueRef.current.push(msg);
+        return;
+      }
+      pendingQueueRef.current.push(msg);
+      setErrorMsg(
+        staticHostDetected
+          ? 'No WebSocket server is running on this domain. Connect a game server URL below or open the full-stack URL.'
+          : 'Reconnecting to game server...'
+      );
+      connect();
+    },
+    [connect, staticHostDetected]
+  );
+
+  const setCustomServerUrl = useCallback(
+    (url: string) => {
+      saveCustomWsUrl(url);
+      failedAttemptsRef.current = 0;
+      setStaticHostDetected(false);
+      setErrorMsg(null);
+      if (reconnectTimerRef.current) {
+        clearTimeout(reconnectTimerRef.current);
+        reconnectTimerRef.current = null;
+      }
+      if (wsRef.current) {
+        wsRef.current.onclose = null;
+        wsRef.current.close();
+        wsRef.current = null;
+      }
+      connect();
+    },
+    [connect]
+  );
 
   useEffect(() => {
     shouldReconnectRef.current = true;
@@ -178,7 +296,11 @@ export function useMafiaSocket() {
     return () => {
       shouldReconnectRef.current = false;
       if (reconnectTimerRef.current) clearTimeout(reconnectTimerRef.current);
-      wsRef.current?.close();
+      if (wsRef.current) {
+        wsRef.current.onclose = null;
+        wsRef.current.close();
+        wsRef.current = null;
+      }
     };
   }, [connect]);
 
@@ -286,6 +408,9 @@ export function useMafiaSocket() {
 
   return {
     connected,
+    staticHostDetected,
+    activeWsUrl,
+    setCustomServerUrl,
     rooms,
     gameState,
     errorMsg,

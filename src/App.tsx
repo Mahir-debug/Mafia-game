@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react';
-import { AlertCircle, Volume2, VolumeX, X } from 'lucide-react';
+import { AlertCircle, Server, Volume2, VolumeX, X } from 'lucide-react';
 import type { DeathEvent } from './shared/types.ts';
-import { useMafiaSocket } from './hooks/useMafiaSocket.ts';
+import { getSavedCustomWsUrl, useMafiaSocket } from './hooks/useMafiaSocket.ts';
 import { soundEngine } from './utils/sound.ts';
 import { LobbyBrowser } from './components/LobbyBrowser.tsx';
 import { WaitingLobby } from './components/WaitingLobby.tsx';
@@ -11,6 +11,8 @@ import { DramaticDeathOverlay } from './components/DramaticDeathOverlay.tsx';
 export default function App() {
   const {
     connected,
+    staticHostDetected,
+    setCustomServerUrl,
     rooms,
     gameState,
     errorMsg,
@@ -37,6 +39,7 @@ export default function App() {
     wasSaved: boolean;
   } | null>(null);
   const [initialRoomCode, setInitialRoomCode] = useState('');
+  const [serverDraft, setServerDraft] = useState(() => getSavedCustomWsUrl());
 
   useEffect(() => {
     const params = new URLSearchParams(window.location.search);
@@ -44,7 +47,12 @@ export default function App() {
     if (code) {
       setInitialRoomCode(code.toUpperCase().slice(0, 8));
     }
-  }, []);
+    const serverParam = params.get('server');
+    if (serverParam) {
+      setServerDraft(serverParam);
+      setCustomServerUrl(serverParam);
+    }
+  }, [setCustomServerUrl]);
 
   const toggleSound = () => {
     const next = !soundMuted;
@@ -134,6 +142,49 @@ export default function App() {
           </div>
         </div>
       </header>
+
+      {/* Static Host Diagnostic Banner (e.g., when deployed to Vercel without a WebSocket backend) */}
+      {staticHostDetected && !connected && (
+        <div className="mx-auto mt-4 w-full max-w-6xl px-4 sm:px-6 lg:px-8">
+          <form
+            onSubmit={(e) => {
+              e.preventDefault();
+              setCustomServerUrl(serverDraft);
+            }}
+            className="flex flex-col gap-3 rounded-xl border border-amber-500/40 bg-amber-950/35 p-4 text-sm text-amber-100 md:flex-row md:items-center md:justify-between"
+          >
+            <div className="flex items-start gap-2.5">
+              <Server className="mt-0.5 h-4 w-4 text-amber-400 shrink-0" />
+              <div>
+                <p className="font-medium text-amber-200">
+                  Static hosting detected — no WebSocket game server found at this domain.
+                </p>
+                <p className="mt-0.5 text-xs text-amber-200/80">
+                  Vercel serves static files only and cannot run server.ts. Deploy this repo on
+                  Render or Railway (render.yaml included) and paste your server URL here, or play
+                  directly on the full-stack URL.
+                </p>
+              </div>
+            </div>
+            <div className="flex items-center gap-2 shrink-0">
+              <input
+                type="text"
+                value={serverDraft}
+                onChange={(e) => setServerDraft(e.target.value)}
+                placeholder="https://your-app.onrender.com"
+                className="w-56 rounded-lg border border-amber-500/30 bg-[#0B0E14] px-3 py-2 text-xs text-[#F4F4F0] placeholder:text-slate-500 focus:border-amber-400 focus:outline-none"
+              />
+              <button
+                type="submit"
+                disabled={!serverDraft.trim()}
+                className="rounded-lg bg-amber-500 px-3.5 py-2 text-xs font-semibold text-black hover:bg-amber-400 disabled:opacity-40 whitespace-nowrap shrink-0 cursor-pointer"
+              >
+                Connect Server
+              </button>
+            </div>
+          </form>
+        </div>
+      )}
 
       {/* Error Toast / Banner */}
       {errorMsg && (
