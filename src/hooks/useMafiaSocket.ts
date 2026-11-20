@@ -66,7 +66,8 @@ export function useMafiaSocket() {
     if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) return;
 
     const proto = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-    const ws = new WebSocket(`${proto}//${window.location.host}/ws`);
+    const wsUrl = import.meta.env.VITE_WS_URL || `${proto}//${window.location.host}/ws`;
+    const ws = new WebSocket(wsUrl);
     wsRef.current = ws;
 
     ws.onopen = () => {
